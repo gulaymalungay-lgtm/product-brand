@@ -1,0 +1,13 @@
+{
+  "name": "shopify-brand-monitor",
+  "version": "1.0.0",
+  "main": "shopify-api-only-monitor.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2",
+    "nodemailer": "^6.9.4"
+  },
+  "type": "module"
+}
