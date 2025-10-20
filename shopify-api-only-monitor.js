@@ -1,227 +1,136 @@
-const fetch = require('node-fetch');
-const nodemailer = require('nodemailer');
-const fs = require('fs');
+import express from "express";
+import fetch from "node-fetch";
+import nodemailer from "nodemailer";
+import fs from "fs";
 
-// Configuration
-const CONFIG = {
-  SHOPIFY_SHOP: 'your-store.myshopify.com',
-  SHOPIFY_ACCESS_TOKEN: 'your-admin-api-token',
-  EMAIL_TO: 'your-email@example.com',
-  BRANDS_TO_MONITOR: ['Brand A', 'Brand B', 'Brand C']
-};
+const app = express();
+app.use(express.json());
 
-// Email setup
+// ---------------- CONFIG ----------------
+const SHOPIFY_STORE = "https://tpt-test1.myshopify.com";
+const ACCESS_TOKEN = "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";
+
+const EMAIL_TO = "jvoorhees109@gmail.com";
+const EMAIL_FROM = "jvoorhees109@gmail.com"; // Gmail
+const EMAIL_PASS = "lvhw jebp lrkx rmbi";   // Gmail app password
+
+const STATE_FILE = "vendor-state.json"; // keeps track to avoid spam
+
+// ---------------- EMAIL SETUP ----------------
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  service: "gmail",
   auth: {
-    user: 'your-gmail@gmail.com',
-    pass: 'your-app-password'
+    user: EMAIL_FROM,
+    pass: EMAIL_PASS
   }
 });
 
-// File to store last known state
-const STATE_FILE = 'brand-state.json';
-
-// Load previous state
+// ---------------- HELPERS ----------------
 function loadState() {
-  try {
-    if (fs.existsSync(STATE_FILE)) {
-      return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    }
-  } catch (error) {
-    console.error('Error loading state:', error);
+  if (fs.existsSync(STATE_FILE)) {
+    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
   }
   return {};
 }
 
-// Save current state
 function saveState(state) {
-  try {
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (error) {
-    console.error('Error saving state:', error);
-  }
+  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-// Fetch all products for a brand using Admin API
-async function getProductsForBrand(vendor) {
+// Fetch all products (with pagination)
+async function getAllProducts() {
   let allProducts = [];
   let pageInfo = null;
-  let hasNextPage = true;
+  let hasNext = true;
 
-  while (hasNextPage) {
-    let url = `https://${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/products.json?vendor=${encodeURIComponent(vendor)}&limit=250`;
-    
-    if (pageInfo) {
-      url += `&page_info=${pageInfo}`;
-    }
+  while (hasNext) {
+    let url = `https://${SHOPIFY_STORE}/admin/api/2024-10/products.json?limit=250`;
+    if (pageInfo) url += `&page_info=${pageInfo}`;
 
-    const response = await fetch(url, {
+    const res = await fetch(url, {
       headers: {
-        'X-Shopify-Access-Token': CONFIG.SHOPIFY_ACCESS_TOKEN,
-        'Content-Type': 'application/json'
+        "X-Shopify-Access-Token": ACCESS_TOKEN,
+        "Content-Type": "application/json"
       }
     });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const data = await res.json();
+    allProducts = allProducts.concat(data.products);
 
-    if (!response.ok) {
-      throw new Error(`API Error: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    allProducts = allProducts.concat(data.products || []);
-
-    // Check for pagination
-    const linkHeader = response.headers.get('Link');
+    const linkHeader = res.headers.get("Link");
     if (linkHeader && linkHeader.includes('rel="next"')) {
       const match = linkHeader.match(/<[^>]*page_info=([^>]+)>; rel="next"/);
       pageInfo = match ? match[1] : null;
-      hasNextPage = !!pageInfo;
-    } else {
-      hasNextPage = false;
-    }
+      hasNext = !!pageInfo;
+    } else hasNext = false;
   }
 
   return allProducts;
 }
 
-// Check stock status for a brand
-async function checkBrandStock(vendor) {
-  console.log(`Checking stock for: ${vendor}`);
-  
-  const products = await getProductsForBrand(vendor);
-  
-  if (products.length === 0) {
-    console.log(`No products found for ${vendor}`);
-    return null;
-  }
-
-  let totalProducts = products.length;
-  let oosProducts = 0;
-  let productDetails = [];
-
-  for (const product of products) {
-    let productTotalStock = 0;
-    
-    for (const variant of product.variants) {
-      productTotalStock += variant.inventory_quantity || 0;
-    }
-    
-    const isOOS = productTotalStock <= 0;
-    if (isOOS) {
-      oosProducts++;
-    }
-
-    productDetails.push({
-      title: product.title,
-      stock: productTotalStock,
-      isOOS: isOOS
-    });
-  }
-
-  return {
-    vendor,
-    allOOS: totalProducts === oosProducts,
-    totalProducts,
-    oosProducts,
-    inStockProducts: totalProducts - oosProducts,
-    productDetails
-  };
-}
-
-// Send email notification
+// Send email
 async function sendEmail(subject, message) {
-  try {
-    await transporter.sendMail({
-      from: 'your-gmail@gmail.com',
-      to: CONFIG.EMAIL_TO,
-      subject: subject,
-      text: message,
-      html: `<pre>${message}</pre>`
-    });
-    console.log('✅ Email sent:', subject);
-  } catch (error) {
-    console.error('❌ Error sending email:', error.message);
-  }
+  await transporter.sendMail({
+    from: EMAIL_FROM,
+    to: EMAIL_TO,
+    subject,
+    text: message,
+    html: `<pre>${message}</pre>`
+  });
+  console.log(`✅ Email sent: ${subject}`);
 }
 
-// Main function
-async function checkAllBrands() {
-  console.log('\n=== Starting Brand Stock Check ===');
-  console.log(`Time: ${new Date().toLocaleString()}\n`);
+// ---------------- MAIN FUNCTION ----------------
+async function checkBrandsStock() {
+  console.log("\n=== Checking all brands ===", new Date().toLocaleString());
+  const products = await getAllProducts();
+  const state = loadState();
+  const newState = {};
 
-  const previousState = loadState();
-  const currentState = {};
+  // Group products by vendor
+  const vendors = {};
+  for (const p of products) {
+    if (!vendors[p.vendor]) vendors[p.vendor] = [];
+    vendors[p.vendor].push(p);
+  }
 
-  for (const brand of CONFIG.BRANDS_TO_MONITOR) {
-    try {
-      const stockStatus = await checkBrandStock(brand);
-      
-      if (!stockStatus) {
-        console.log(`⚠️  ${brand}: No products found\n`);
-        continue;
-      }
+  // Check stock per vendor
+  for (const [vendor, products] of Object.entries(vendors)) {
+    const allOOS = products.every(prod =>
+      prod.variants.every(v => v.inventory_quantity <= 0)
+    );
 
-      currentState[brand] = stockStatus.allOOS ? 'OOS' : 'IN_STOCK';
-      const previousBrandState = previousState[brand];
+    newState[vendor] = allOOS ? "OOS" : "IN_STOCK";
 
-      console.log(`📊 ${brand}:`);
-      console.log(`   Total Products: ${stockStatus.totalProducts}`);
-      console.log(`   In Stock: ${stockStatus.inStockProducts}`);
-      console.log(`   Out of Stock: ${stockStatus.oosProducts}`);
-      console.log(`   Status: ${stockStatus.allOOS ? '🔴 ALL OOS' : '🟢 Some in stock'}\n`);
-
-      // State changed from IN_STOCK to OOS
-      if (stockStatus.allOOS && previousBrandState !== 'OOS') {
-        console.log(`🚨 ALERT: ${brand} is now completely out of stock!`);
-        
-        await sendEmail(
-          `🚨 ALL ${brand} Products OUT OF STOCK`,
-          `All ${stockStatus.totalProducts} products for "${brand}" are now out of stock.\n\n` +
-          `⚠️  Action Required: Hide this brand from your brand page.\n\n` +
-          `Brand: ${brand}\n` +
-          `Total Products: ${stockStatus.totalProducts}\n` +
-          `Out of Stock: ${stockStatus.oosProducts}\n\n` +
-          `Checked at: ${new Date().toLocaleString()}`
-        );
-      }
-
-      // State changed from OOS to IN_STOCK
-      else if (!stockStatus.allOOS && previousBrandState === 'OOS') {
-        console.log(`✅ GOOD NEWS: ${brand} has products back in stock!`);
-        
-        await sendEmail(
-          `✅ ${brand} Products BACK IN STOCK`,
-          `Good news! ${stockStatus.inStockProducts} product(s) for "${brand}" are back in stock.\n\n` +
-          `✓ Action Required: Show this brand on your brand page.\n\n` +
-          `Brand: ${brand}\n` +
-          `Total Products: ${stockStatus.totalProducts}\n` +
-          `In Stock: ${stockStatus.inStockProducts}\n` +
-          `Out of Stock: ${stockStatus.oosProducts}\n\n` +
-          `Checked at: ${new Date().toLocaleString()}`
-        );
-      }
-
-      // Add delay to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-    } catch (error) {
-      console.error(`❌ Error checking ${brand}:`, error.message);
+    // Only send email if state changed
+    if (allOOS && state[vendor] !== "OOS") {
+      await sendEmail(
+        `🚨 ALL ${vendor} Products OUT OF STOCK`,
+        `All products under the brand "${vendor}" are now out of stock.\n\n` +
+        `⚠️ Action Required: Hide this brand on your brand page.`
+      );
+    } else if (!allOOS && state[vendor] === "OOS") {
+      await sendEmail(
+        `✅ ${vendor} Products BACK IN STOCK`,
+        `Some products under the brand "${vendor}" are back in stock.\n\n` +
+        `✅ Action Required: Show this brand on your brand page.`
+      );
     }
   }
 
-  // Save current state for next run
-  saveState(currentState);
-  
-  console.log('\n=== Check Complete ===\n');
+  saveState(newState);
+  console.log("=== Brand check complete ===\n");
 }
 
-// Run the check
-checkAllBrands()
-  .then(() => {
-    console.log('Script finished successfully');
-    process.exit(0);
-  })
-  .catch((error) => {
-    console.error('Script failed:', error);
-    process.exit(1);
-  });
+// ---------------- ENDPOINTS ----------------
+app.get("/check-now", async (req, res) => {
+  try {
+    await checkBrandsStock();
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.listen(3000, () => console.log("🚀 Server running on port 3000"));
