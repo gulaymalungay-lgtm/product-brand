@@ -1,136 +1,253 @@
-import express from "express";
-import fetch from "node-fetch";
-import nodemailer from "nodemailer";
-import fs from "fs";
+const express = require('express');
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
+const fetch = require('node-fetch');
 
 const app = express();
 app.use(express.json());
 
-// ---------------- CONFIG ----------------
-const SHOPIFY_STORE = "https://tpt-test1.myshopify.com";
-const ACCESS_TOKEN = "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";
+// Configuration from environment variables
+const CONFIG = {
+  SHOPIFY_SHOP: process.env.SHOPIFY_SHOP,
+  SHOPIFY_ACCESS_TOKEN: process.env.SHOPIFY_ACCESS_TOKEN,
+  SHOPIFY_WEBHOOK_SECRET: process.env.SHOPIFY_WEBHOOK_SECRET,
+  EMAIL_FROM: process.env.EMAIL_FROM,
+  EMAIL_TO: process.env.EMAIL_TO,
+  EMAIL_PASSWORD: process.env.EMAIL_PASSWORD,
+  BRANDS_TO_MONITOR: process.env.BRANDS_TO_MONITOR ? 
+    process.env.BRANDS_TO_MONITOR.split(',').map(b => b.trim()) : []
+};
 
-const EMAIL_TO = "jvoorhees109@gmail.com";
-const EMAIL_FROM = "jvoorhees109@gmail.com"; // Gmail
-const EMAIL_PASS = "lvhw jebp lrkx rmbi";   // Gmail app password
+// Validate configuration on startup
+const requiredVars = [
+  'SHOPIFY_SHOP', 
+  'SHOPIFY_ACCESS_TOKEN', 
+  'SHOPIFY_WEBHOOK_SECRET',
+  'EMAIL_FROM',
+  'EMAIL_TO',
+  'EMAIL_PASSWORD',
+  'BRANDS_TO_MONITOR'
+];
 
-const STATE_FILE = "vendor-state.json"; // keeps track to avoid spam
+for (const varName of requiredVars) {
+  if (!process.env[varName]) {
+    console.error(`❌ Missing required environment variable: ${varName}`);
+    process.exit(1);
+  }
+}
 
-// ---------------- EMAIL SETUP ----------------
+console.log('✅ Configuration loaded successfully');
+console.log(`📦 Monitoring ${CONFIG.BRANDS_TO_MONITOR.length} brands:`, CONFIG.BRANDS_TO_MONITOR);
+
+// Email setup
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  service: 'gmail',
   auth: {
-    user: EMAIL_FROM,
-    pass: EMAIL_PASS
+    user: CONFIG.EMAIL_FROM,
+    pass: CONFIG.EMAIL_PASSWORD
   }
 });
 
-// ---------------- HELPERS ----------------
-function loadState() {
-  if (fs.existsSync(STATE_FILE)) {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-  }
-  return {};
+// Track last notification state to avoid spam
+const lastNotificationState = {};
+
+// Verify webhook authenticity
+function verifyWebhook(req) {
+  const hmac = req.get('X-Shopify-Hmac-Sha256');
+  const body = JSON.stringify(req.body);
+  const hash = crypto
+    .createHmac('sha256', CONFIG.SHOPIFY_WEBHOOK_SECRET)
+    .update(body, 'utf8')
+    .digest('base64');
+  return hash === hmac;
 }
 
-function saveState(state) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-}
-
-// Fetch all products (with pagination)
-async function getAllProducts() {
+// Fetch all products for a brand (handles pagination)
+async function getProductsForBrand(vendor) {
   let allProducts = [];
-  let pageInfo = null;
-  let hasNext = true;
-
-  while (hasNext) {
-    let url = `https://${SHOPIFY_STORE}/admin/api/2024-10/products.json?limit=250`;
-    if (pageInfo) url += `&page_info=${pageInfo}`;
-
-    const res = await fetch(url, {
+  let url = `https://${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/products.json?vendor=${encodeURIComponent(vendor)}&limit=250`;
+  
+  while (url) {
+    const response = await fetch(url, {
       headers: {
-        "X-Shopify-Access-Token": ACCESS_TOKEN,
-        "Content-Type": "application/json"
+        'X-Shopify-Access-Token': CONFIG.SHOPIFY_ACCESS_TOKEN,
+        'Content-Type': 'application/json'
       }
     });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    const data = await res.json();
-    allProducts = allProducts.concat(data.products);
-
-    const linkHeader = res.headers.get("Link");
-    if (linkHeader && linkHeader.includes('rel="next"')) {
-      const match = linkHeader.match(/<[^>]*page_info=([^>]+)>; rel="next"/);
-      pageInfo = match ? match[1] : null;
-      hasNext = !!pageInfo;
-    } else hasNext = false;
+    
+    if (!response.ok) {
+      throw new Error(`Shopify API error: ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    allProducts = allProducts.concat(data.products || []);
+    
+    // Check for pagination
+    const linkHeader = response.headers.get('Link');
+    url = null;
+    if (linkHeader) {
+      const nextMatch = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+      if (nextMatch) {
+        url = nextMatch[1];
+      }
+    }
   }
-
+  
   return allProducts;
 }
 
-// Send email
-async function sendEmail(subject, message) {
-  await transporter.sendMail({
-    from: EMAIL_FROM,
-    to: EMAIL_TO,
-    subject,
-    text: message,
-    html: `<pre>${message}</pre>`
-  });
-  console.log(`✅ Email sent: ${subject}`);
-}
-
-// ---------------- MAIN FUNCTION ----------------
-async function checkBrandsStock() {
-  console.log("\n=== Checking all brands ===", new Date().toLocaleString());
-  const products = await getAllProducts();
-  const state = loadState();
-  const newState = {};
-
-  // Group products by vendor
-  const vendors = {};
-  for (const p of products) {
-    if (!vendors[p.vendor]) vendors[p.vendor] = [];
-    vendors[p.vendor].push(p);
+// Check if all products in brand are OOS
+async function checkBrandStock(vendor) {
+  const products = await getProductsForBrand(vendor);
+  
+  if (products.length === 0) {
+    return { 
+      allOOS: false, 
+      totalProducts: 0, 
+      oosProducts: 0,
+      inStockProducts: 0
+    };
   }
-
-  // Check stock per vendor
-  for (const [vendor, products] of Object.entries(vendors)) {
-    const allOOS = products.every(prod =>
-      prod.variants.every(v => v.inventory_quantity <= 0)
-    );
-
-    newState[vendor] = allOOS ? "OOS" : "IN_STOCK";
-
-    // Only send email if state changed
-    if (allOOS && state[vendor] !== "OOS") {
-      await sendEmail(
-        `🚨 ALL ${vendor} Products OUT OF STOCK`,
-        `All products under the brand "${vendor}" are now out of stock.\n\n` +
-        `⚠️ Action Required: Hide this brand on your brand page.`
-      );
-    } else if (!allOOS && state[vendor] === "OOS") {
-      await sendEmail(
-        `✅ ${vendor} Products BACK IN STOCK`,
-        `Some products under the brand "${vendor}" are back in stock.\n\n` +
-        `✅ Action Required: Show this brand on your brand page.`
-      );
+  
+  let totalProducts = products.length;
+  let oosProducts = 0;
+  
+  for (const product of products) {
+    let productTotalStock = 0;
+    
+    for (const variant of product.variants) {
+      productTotalStock += variant.inventory_quantity || 0;
+    }
+    
+    if (productTotalStock <= 0) {
+      oosProducts++;
     }
   }
-
-  saveState(newState);
-  console.log("=== Brand check complete ===\n");
+  
+  return {
+    allOOS: totalProducts === oosProducts,
+    totalProducts,
+    oosProducts,
+    inStockProducts: totalProducts - oosProducts
+  };
 }
 
-// ---------------- ENDPOINTS ----------------
-app.get("/check-now", async (req, res) => {
+// Send email notification
+async function sendEmail(subject, message) {
   try {
-    await checkBrandsStock();
-    res.json({ success: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    await transporter.sendMail({
+      from: CONFIG.EMAIL_FROM,
+      to: CONFIG.EMAIL_TO,
+      subject: subject,
+      text: message,
+      html: `<div style="font-family: monospace; white-space: pre-wrap;">${message}</div>`
+    });
+    console.log('✅ Email sent:', subject);
+  } catch (error) {
+    console.error('❌ Error sending email:', error);
+  }
+}
+
+// Main webhook handler
+app.post('/webhook/inventory', async (req, res) => {
+  console.log('📥 Webhook received');
+  
+  // Verify webhook is from Shopify
+  if (!verifyWebhook(req)) {
+    console.log('❌ Invalid webhook signature');
+    return res.status(401).send('Unauthorized');
+  }
+  
+  console.log('✅ Webhook verified');
+  
+  // Respond immediately to Shopify
+  res.status(200).send('OK');
+  
+  try {
+    // Check each monitored brand
+    for (const brand of CONFIG.BRANDS_TO_MONITOR) {
+      console.log(`🔍 Checking stock for: ${brand}`);
+      const stockStatus = await checkBrandStock(brand);
+      const lastState = lastNotificationState[brand];
+      
+      console.log(`📊 ${brand}: ${stockStatus.inStockProducts}/${stockStatus.totalProducts} in stock`);
+      
+      // All products are OOS - send alert if state changed
+      if (stockStatus.allOOS && lastState !== 'OOS') {
+        console.log(`🚨 ${brand} - ALL OUT OF STOCK`);
+        await sendEmail(
+          `🚨 ALL ${brand} Products OUT OF STOCK`,
+          `All ${stockStatus.totalProducts} products for "${brand}" are now out of stock.\n\n` +
+          `⚠️ ACTION REQUIRED: Hide this brand from your brand page.\n\n` +
+          `Brand: ${brand}\n` +
+          `Total Products: ${stockStatus.totalProducts}\n` +
+          `Out of Stock: ${stockStatus.oosProducts}\n\n` +
+          `Timestamp: ${new Date().toISOString()}`
+        );
+        lastNotificationState[brand] = 'OOS';
+      }
+      
+      // At least one product back in stock
+      else if (!stockStatus.allOOS && stockStatus.inStockProducts > 0 && lastState === 'OOS') {
+        console.log(`✅ ${brand} - BACK IN STOCK`);
+        await sendEmail(
+          `✅ ${brand} Products BACK IN STOCK`,
+          `Good news! ${stockStatus.inStockProducts} product(s) for "${brand}" are back in stock.\n\n` +
+          `✅ ACTION REQUIRED: Show this brand on your brand page.\n\n` +
+          `Brand: ${brand}\n` +
+          `Total Products: ${stockStatus.totalProducts}\n` +
+          `In Stock: ${stockStatus.inStockProducts}\n` +
+          `Out of Stock: ${stockStatus.oosProducts}\n\n` +
+          `Timestamp: ${new Date().toISOString()}`
+        );
+        lastNotificationState[brand] = 'IN_STOCK';
+      }
+    }
+  } catch (error) {
+    console.error('❌ Error processing webhook:', error);
   }
 });
 
-app.listen(3000, () => console.log("🚀 Server running on port 3000"));
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    monitoring: CONFIG.BRANDS_TO_MONITOR,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Manual trigger endpoint for testing
+app.get('/check-now', async (req, res) => {
+  try {
+    console.log('🔄 Manual check triggered');
+    const results = {};
+    for (const brand of CONFIG.BRANDS_TO_MONITOR) {
+      results[brand] = await checkBrandStock(brand);
+    }
+    res.json(results);
+  } catch (error) {
+    console.error('❌ Error in manual check:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    service: 'Shopify Brand Inventory Monitor',
+    status: 'running',
+    monitoring: CONFIG.BRANDS_TO_MONITOR.length + ' brands',
+    endpoints: {
+      health: '/health',
+      webhook: '/webhook/inventory (POST)',
+      manualCheck: '/check-now'
+    }
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Webhook server running on port ${PORT}`);
+  console.log(`📦 Monitoring ${CONFIG.BRANDS_TO_MONITOR.length} brands`);
+});
