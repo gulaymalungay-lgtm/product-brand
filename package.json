@@ -1,14 +1,17 @@
 {
-  "name": "shopify-brand-monitor",
+  "name": "shopify-inventory-monitor",
   "version": "1.0.0",
-  "main": "shopify-api-only-monitor.js",
+  "description": "Monitor Shopify brand inventory and send notifications",
+  "main": "server.js",
   "scripts": {
-    "start": "node shopify-api-only-monitor.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "node-fetch": "^3.3.2",
-    "nodemailer": "^6.9.4",
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "nodemailer": "^6.9.7",
+    "node-fetch": "^2.7.0"
   },
-  "type": "module"
+  "engines": {
+    "node": ">=14.x"
+  }
 }
