@@ -3,11 +3,12 @@
   "version": "1.0.0",
   "main": "shopify-api-only-monitor.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node shopify-api-only-monitor.js"
   },
   "dependencies": {
     "node-fetch": "^3.3.2",
-    "nodemailer": "^6.9.4"
+    "nodemailer": "^6.9.4",
+    "express": "^4.18.2"
   },
   "type": "module"
 }
