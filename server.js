@@ -38,19 +38,19 @@ for (const varName of requiredVars) {
 
 console.log('✅ Configuration loaded successfully');
 console.log(`📦 Monitoring ${CONFIG.BRANDS_TO_MONITOR.length} brands:`, CONFIG.BRANDS_TO_MONITOR);
+console.log(`📧 Email config: FROM=${CONFIG.EMAIL_FROM} TO=${CONFIG.EMAIL_TO}`);
 
 // Email setup with better Gmail configuration
 const transporter = nodemailer.createTransport({
   host: 'smtp.gmail.com',
-  port: 587,
-  secure: false, // use TLS
+  port: 465,
+  secure: true, // use SSL
   auth: {
     user: CONFIG.EMAIL_FROM,
     pass: CONFIG.EMAIL_PASSWORD
   },
-  tls: {
-    rejectUnauthorized: false
-  }
+  connectionTimeout: 10000, // 10 second timeout
+  greetingTimeout: 10000
 });
 
 // Verify email connection on startup
@@ -148,23 +148,31 @@ async function checkBrandStock(vendor) {
   };
 }
 
-// Send email notification
+// Send email notification with timeout
 async function sendEmail(subject, message) {
   try {
-    const info = await transporter.sendMail({
+    // Add a 10 second timeout
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Email send timeout after 10 seconds')), 10000)
+    );
+    
+    const sendPromise = transporter.sendMail({
       from: CONFIG.EMAIL_FROM,
       to: CONFIG.EMAIL_TO,
       subject: subject,
       text: message,
       html: `<div style="font-family: monospace; white-space: pre-wrap;">${message}</div>`
     });
+    
+    const info = await Promise.race([sendPromise, timeoutPromise]);
     console.log('✅ Email sent:', subject);
     console.log('📧 Message ID:', info.messageId);
     return { success: true, messageId: info.messageId };
   } catch (error) {
     console.error('❌ Error sending email:', error);
-    console.error('Error details:', error.message);
-    return { success: false, error: error.message };
+    console.error('Error code:', error.code);
+    console.error('Error message:', error.message);
+    return { success: false, error: error.message, code: error.code };
   }
 }
 
