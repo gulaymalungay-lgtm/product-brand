@@ -4,11 +4,23 @@ const nodemailer = require('nodemailer');
 const fetch = require('node-fetch');
 
 const app = express();
+
+// FIXED: Handle empty/null bodies from test webhooks
 app.use(express.json({
   verify: (req, res, buf) => {
     req.rawBody = buf.toString(); // this saves the raw body for HMAC verification
-  }
+  },
+  strict: false,  // Allow values like 'null'
+  type: ['application/json', 'text/plain'] // Accept both content types
 }));
+
+// Fallback for completely empty bodies
+app.use((req, res, next) => {
+  if (req.rawBody === '' || req.rawBody === 'null') {
+    req.body = {};
+  }
+  next();
+});
 
 // Configuration from environment variables
 const CONFIG = {
@@ -84,19 +96,15 @@ if (CONFIG.SENDGRID_API_KEY) {
 // Track last notification state to avoid spam
 const lastNotificationState = {};
 
-// Verify webhook authenticity
-// function verifyWebhook(req) {
-//   const hmac = req.get('X-Shopify-Hmac-Sha256');
-//   const body = JSON.stringify(req.body);
-//   const hash = crypto
-//     .createHmac('sha256', CONFIG.SHOPIFY_WEBHOOK_SECRET)
-//     .update(body, 'utf8')
-//     .digest('base64');
-//   return hash === hmac;
-// }
-
+// Verify webhook authenticity - FIXED VERSION
 function verifyWebhook(req) {
   const hmac = req.get('X-Shopify-Hmac-Sha256');
+  
+  if (!hmac) {
+    console.log('⚠️  No HMAC header found');
+    return false;
+  }
+  
   const generatedHash = crypto
     .createHmac('sha256', process.env.SHOPIFY_WEBHOOK_SECRET)
     .update(req.rawBody, 'utf8')
@@ -109,6 +117,7 @@ function verifyWebhook(req) {
     return false; // handles case if either value is undefined
   }
 }
+
 // Fetch all products for a brand (handles pagination)
 async function getProductsForBrand(vendor) {
   let allProducts = [];
@@ -252,9 +261,12 @@ async function sendEmail(subject, message) {
   }
 }
 
-// Main webhook handler
+// Main webhook handler - FIXED VERSION
 app.post('/webhook/inventory', async (req, res) => {
   console.log('📥 Webhook received');
+  console.log('📋 Headers:', JSON.stringify(req.headers, null, 2));
+  console.log('📦 Body type:', typeof req.body);
+  console.log('📦 Raw body length:', req.rawBody?.length || 0);
   
   // Verify webhook is from Shopify
   if (!verifyWebhook(req)) {
@@ -263,6 +275,15 @@ app.post('/webhook/inventory', async (req, res) => {
   }
   
   console.log('✅ Webhook verified');
+  
+  // Handle test webhooks (they often have empty bodies)
+  if (!req.body || Object.keys(req.body).length === 0) {
+    console.log('⚠️  Empty webhook body (likely a test webhook)');
+    console.log('✅ Test webhook received successfully');
+    return res.status(200).send('OK - Test webhook received');
+  }
+  
+  console.log('📄 Webhook body:', JSON.stringify(req.body, null, 2));
   
   // Respond immediately to Shopify
   res.status(200).send('OK');
@@ -374,6 +395,66 @@ app.get('/test-email', async (req, res) => {
   }
 });
 
+// NEW: List all registered webhooks
+app.get('/admin/webhooks', async (req, res) => {
+  try {
+    const response = await fetch(
+      `https://${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/webhooks.json`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': CONFIG.SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    const data = await response.json();
+    res.json(data);
+    console.log('📋 Registered webhooks:', data.webhooks?.length || 0);
+  } catch (error) {
+    console.error('❌ Error fetching webhooks:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// NEW: Register webhook programmatically
+app.post('/admin/register-webhook', async (req, res) => {
+  const webhookUrl = req.body.url || `https://${req.get('host')}/webhook/inventory`;
+  
+  try {
+    const response = await fetch(
+      `https://${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/webhooks.json`,
+      {
+        method: 'POST',
+        headers: {
+          'X-Shopify-Access-Token': CONFIG.SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          webhook: {
+            topic: 'inventory_levels/update',
+            address: webhookUrl,
+            format: 'json'
+          }
+        })
+      }
+    );
+    
+    const data = await response.json();
+    
+    if (response.ok) {
+      res.json({ success: true, webhook: data.webhook });
+      console.log('✅ Webhook registered:', data.webhook.id);
+    } else {
+      res.status(500).json({ success: false, error: data });
+      console.error('❌ Webhook registration failed:', data);
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+    console.error('❌ Error registering webhook:', error);
+  }
+});
+
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
@@ -385,7 +466,9 @@ app.get('/', (req, res) => {
       health: '/health',
       webhook: '/webhook/inventory (POST)',
       manualCheck: '/check-now',
-      testEmail: '/test-email'
+      testEmail: '/test-email',
+      listWebhooks: '/admin/webhooks',
+      registerWebhook: '/admin/register-webhook (POST)'
     }
   });
 });
