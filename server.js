@@ -5,18 +5,18 @@ const fetch = require('node-fetch');
 
 const app = express();
 
-// FIXED: Handle empty/null bodies from test webhooks
+// CRITICAL FIX: Save raw body as Buffer (not string) for HMAC verification
 app.use(express.json({
   verify: (req, res, buf) => {
-    req.rawBody = buf.toString(); // this saves the raw body for HMAC verification
+    req.rawBody = buf; // Save as Buffer, not string!
   },
-  strict: false,  // Allow values like 'null'
-  type: ['application/json', 'text/plain'] // Accept both content types
+  strict: false,
+  type: ['application/json', 'text/plain']
 }));
 
-// Fallback for completely empty bodies
+// Fallback for empty bodies
 app.use((req, res, next) => {
-  if (req.rawBody === '' || req.rawBody === 'null') {
+  if (!req.body || (typeof req.body === 'object' && Object.keys(req.body).length === 0)) {
     req.body = {};
   }
   next();
@@ -96,7 +96,7 @@ if (CONFIG.SENDGRID_API_KEY) {
 // Track last notification state to avoid spam
 const lastNotificationState = {};
 
-// Verify webhook authenticity - FIXED VERSION
+// Verify webhook authenticity - CRITICAL FIX
 function verifyWebhook(req) {
   const hmac = req.get('X-Shopify-Hmac-Sha256');
   
@@ -105,16 +105,27 @@ function verifyWebhook(req) {
     return false;
   }
   
+  if (!req.rawBody) {
+    console.log('⚠️  No raw body available for verification');
+    return false;
+  }
+  
   const generatedHash = crypto
-    .createHmac('sha256', process.env.SHOPIFY_WEBHOOK_SECRET)
-    .update(req.rawBody, 'utf8')
+    .createHmac('sha256', CONFIG.SHOPIFY_WEBHOOK_SECRET)
+    .update(req.rawBody) // Use Buffer directly, don't convert to string
     .digest('base64');
+
+  console.log('🔐 HMAC Verification:');
+  console.log('   Shopify HMAC:', hmac);
+  console.log('   Generated HMAC:', generatedHash);
+  console.log('   Match:', generatedHash === hmac);
 
   // timingSafeEqual avoids timing attacks (recommended)
   try {
     return crypto.timingSafeEqual(Buffer.from(generatedHash), Buffer.from(hmac));
-  } catch {
-    return false; // handles case if either value is undefined
+  } catch (err) {
+    console.log('❌ timingSafeEqual failed:', err.message);
+    return false;
   }
 }
 
