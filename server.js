@@ -4,7 +4,11 @@ const nodemailer = require('nodemailer');
 const fetch = require('node-fetch');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString(); // this saves the raw body for HMAC verification
+  }
+}));
 
 // Configuration from environment variables
 const CONFIG = {
@@ -81,16 +85,30 @@ if (CONFIG.SENDGRID_API_KEY) {
 const lastNotificationState = {};
 
 // Verify webhook authenticity
+// function verifyWebhook(req) {
+//   const hmac = req.get('X-Shopify-Hmac-Sha256');
+//   const body = JSON.stringify(req.body);
+//   const hash = crypto
+//     .createHmac('sha256', CONFIG.SHOPIFY_WEBHOOK_SECRET)
+//     .update(body, 'utf8')
+//     .digest('base64');
+//   return hash === hmac;
+// }
+
 function verifyWebhook(req) {
   const hmac = req.get('X-Shopify-Hmac-Sha256');
-  const body = JSON.stringify(req.body);
-  const hash = crypto
-    .createHmac('sha256', CONFIG.SHOPIFY_WEBHOOK_SECRET)
-    .update(body, 'utf8')
+  const generatedHash = crypto
+    .createHmac('sha256', process.env.SHOPIFY_WEBHOOK_SECRET)
+    .update(req.rawBody, 'utf8')
     .digest('base64');
-  return hash === hmac;
-}
 
+  // timingSafeEqual avoids timing attacks (recommended)
+  try {
+    return crypto.timingSafeEqual(Buffer.from(generatedHash), Buffer.from(hmac));
+  } catch {
+    return false; // handles case if either value is undefined
+  }
+}
 // Fetch all products for a brand (handles pagination)
 async function getProductsForBrand(vendor) {
   let allProducts = [];
