@@ -39,12 +39,28 @@ for (const varName of requiredVars) {
 console.log('✅ Configuration loaded successfully');
 console.log(`📦 Monitoring ${CONFIG.BRANDS_TO_MONITOR.length} brands:`, CONFIG.BRANDS_TO_MONITOR);
 
-// Email setup
+// Email setup with better Gmail configuration
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false, // use TLS
   auth: {
     user: CONFIG.EMAIL_FROM,
     pass: CONFIG.EMAIL_PASSWORD
+  },
+  tls: {
+    rejectUnauthorized: false
+  }
+});
+
+// Verify email connection on startup
+transporter.verify(function(error, success) {
+  if (error) {
+    console.error('❌ Email connection failed:', error);
+    console.error('Check your EMAIL_FROM and EMAIL_PASSWORD settings');
+  } else {
+    console.log('✅ Email server is ready to send messages');
+    console.log(`📧 Emails will be sent from: ${CONFIG.EMAIL_FROM} to: ${CONFIG.EMAIL_TO}`);
   }
 });
 
@@ -135,7 +151,7 @@ async function checkBrandStock(vendor) {
 // Send email notification
 async function sendEmail(subject, message) {
   try {
-    await transporter.sendMail({
+    const info = await transporter.sendMail({
       from: CONFIG.EMAIL_FROM,
       to: CONFIG.EMAIL_TO,
       subject: subject,
@@ -143,8 +159,12 @@ async function sendEmail(subject, message) {
       html: `<div style="font-family: monospace; white-space: pre-wrap;">${message}</div>`
     });
     console.log('✅ Email sent:', subject);
+    console.log('📧 Message ID:', info.messageId);
+    return { success: true, messageId: info.messageId };
   } catch (error) {
     console.error('❌ Error sending email:', error);
+    console.error('Error details:', error.message);
+    return { success: false, error: error.message };
   }
 }
 
@@ -232,6 +252,40 @@ app.get('/check-now', async (req, res) => {
   }
 });
 
+// Test email endpoint - NEW!
+app.get('/test-email', async (req, res) => {
+  try {
+    console.log('📧 Testing email...');
+    const result = await sendEmail(
+      '🧪 Test Email from Shopify Monitor',
+      `This is a test email to verify your email configuration is working.\n\n` +
+      `From: ${CONFIG.EMAIL_FROM}\n` +
+      `To: ${CONFIG.EMAIL_TO}\n` +
+      `Timestamp: ${new Date().toISOString()}\n\n` +
+      `If you're seeing this, your email setup is working correctly! ✅`
+    );
+    
+    if (result.success) {
+      res.json({ 
+        success: true, 
+        message: 'Test email sent! Check your inbox at ' + CONFIG.EMAIL_TO,
+        messageId: result.messageId 
+      });
+    } else {
+      res.status(500).json({ 
+        success: false, 
+        error: result.error 
+      });
+    }
+  } catch (error) {
+    console.error('❌ Test email failed:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
@@ -241,7 +295,8 @@ app.get('/', (req, res) => {
     endpoints: {
       health: '/health',
       webhook: '/webhook/inventory (POST)',
-      manualCheck: '/check-now'
+      manualCheck: '/check-now',
+      testEmail: '/test-email'
     }
   });
 });
