@@ -369,6 +369,20 @@ app.get('/check-now', async (req, res) => {
   }
 });
 
+// NEW: Debug endpoint - check your configuration
+app.get('/debug-config', (req, res) => {
+  res.json({
+    shopifyShop: CONFIG.SHOPIFY_SHOP,
+    hasAccessToken: !!CONFIG.SHOPIFY_ACCESS_TOKEN,
+    accessTokenLength: CONFIG.SHOPIFY_ACCESS_TOKEN?.length || 0,
+    hasWebhookSecret: !!CONFIG.SHOPIFY_WEBHOOK_SECRET,
+    webhookSecretLength: CONFIG.SHOPIFY_WEBHOOK_SECRET?.length || 0,
+    webhookSecretPreview: CONFIG.SHOPIFY_WEBHOOK_SECRET ? 
+      CONFIG.SHOPIFY_WEBHOOK_SECRET.substring(0, 4) + '...' + CONFIG.SHOPIFY_WEBHOOK_SECRET.substring(CONFIG.SHOPIFY_WEBHOOK_SECRET.length - 4) : 
+      'NOT SET'
+  });
+});
+
 // Test email endpoint
 app.get('/test-email', async (req, res) => {
   try {
