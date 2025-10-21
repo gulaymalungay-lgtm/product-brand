@@ -15,7 +15,9 @@ const CONFIG = {
   EMAIL_TO: process.env.EMAIL_TO,
   EMAIL_PASSWORD: process.env.EMAIL_PASSWORD,
   BRANDS_TO_MONITOR: process.env.BRANDS_TO_MONITOR ? 
-    process.env.BRANDS_TO_MONITOR.split(',').map(b => b.trim()) : []
+    process.env.BRANDS_TO_MONITOR.split(',').map(b => b.trim()) : [],
+  // Optional: Use SendGrid API key instead of SMTP
+  SENDGRID_API_KEY: process.env.SENDGRID_API_KEY || null
 };
 
 // Validate configuration on startup
@@ -25,7 +27,6 @@ const requiredVars = [
   'SHOPIFY_WEBHOOK_SECRET',
   'EMAIL_FROM',
   'EMAIL_TO',
-  'EMAIL_PASSWORD',
   'BRANDS_TO_MONITOR'
 ];
 
@@ -40,29 +41,41 @@ console.log('✅ Configuration loaded successfully');
 console.log(`📦 Monitoring ${CONFIG.BRANDS_TO_MONITOR.length} brands:`, CONFIG.BRANDS_TO_MONITOR);
 console.log(`📧 Email config: FROM=${CONFIG.EMAIL_FROM} TO=${CONFIG.EMAIL_TO}`);
 
-// Email setup with better Gmail configuration
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 465,
-  secure: true, // use SSL
-  auth: {
-    user: CONFIG.EMAIL_FROM,
-    pass: CONFIG.EMAIL_PASSWORD
-  },
-  connectionTimeout: 10000, // 10 second timeout
-  greetingTimeout: 10000
-});
+// Email setup - Choose method based on available credentials
+let transporter;
+let emailMethod = 'none';
 
-// Verify email connection on startup
-transporter.verify(function(error, success) {
-  if (error) {
-    console.error('❌ Email connection failed:', error);
-    console.error('Check your EMAIL_FROM and EMAIL_PASSWORD settings');
-  } else {
-    console.log('✅ Email server is ready to send messages');
-    console.log(`📧 Emails will be sent from: ${CONFIG.EMAIL_FROM} to: ${CONFIG.EMAIL_TO}`);
-  }
-});
+if (CONFIG.SENDGRID_API_KEY) {
+  // Use SendGrid API (recommended for production)
+  emailMethod = 'sendgrid';
+  console.log('📧 Using SendGrid API for emails');
+} else if (CONFIG.EMAIL_PASSWORD) {
+  // Use Gmail SMTP
+  emailMethod = 'smtp';
+  transporter = nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true,
+    auth: {
+      user: CONFIG.EMAIL_FROM,
+      pass: CONFIG.EMAIL_PASSWORD
+    },
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 10000
+  });
+  console.log('📧 Using Gmail SMTP for emails');
+  
+  // Verify SMTP connection
+  transporter.verify(function(error, success) {
+    if (error) {
+      console.error('❌ SMTP connection failed:', error.message);
+      console.error('⚠️  Consider using SendGrid instead - add SENDGRID_API_KEY to env vars');
+    } else {
+      console.log('✅ SMTP server is ready to send messages');
+    }
+  });
+}
 
 // Track last notification state to avoid spam
 const lastNotificationState = {};
@@ -148,12 +161,47 @@ async function checkBrandStock(vendor) {
   };
 }
 
-// Send email notification with timeout
-async function sendEmail(subject, message) {
+// Send email via SendGrid API
+async function sendEmailViaSendGrid(subject, message) {
   try {
-    // Add a 10 second timeout
+    const response = await fetch('https://api.sendgrid.com/v3/mail/send', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${CONFIG.SENDGRID_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        personalizations: [{
+          to: [{ email: CONFIG.EMAIL_TO }]
+        }],
+        from: { email: CONFIG.EMAIL_FROM },
+        subject: subject,
+        content: [{
+          type: 'text/plain',
+          value: message
+        }]
+      })
+    });
+    
+    if (response.ok) {
+      console.log('✅ Email sent via SendGrid:', subject);
+      return { success: true, method: 'sendgrid' };
+    } else {
+      const error = await response.text();
+      console.error('❌ SendGrid error:', error);
+      return { success: false, error: error };
+    }
+  } catch (error) {
+    console.error('❌ SendGrid request failed:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// Send email via SMTP with timeout
+async function sendEmailViaSMTP(subject, message) {
+  try {
     const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Email send timeout after 10 seconds')), 10000)
+      setTimeout(() => reject(new Error('Email send timeout after 15 seconds')), 15000)
     );
     
     const sendPromise = transporter.sendMail({
@@ -165,14 +213,24 @@ async function sendEmail(subject, message) {
     });
     
     const info = await Promise.race([sendPromise, timeoutPromise]);
-    console.log('✅ Email sent:', subject);
+    console.log('✅ Email sent via SMTP:', subject);
     console.log('📧 Message ID:', info.messageId);
-    return { success: true, messageId: info.messageId };
+    return { success: true, messageId: info.messageId, method: 'smtp' };
   } catch (error) {
-    console.error('❌ Error sending email:', error);
-    console.error('Error code:', error.code);
-    console.error('Error message:', error.message);
+    console.error('❌ SMTP error:', error.code, error.message);
     return { success: false, error: error.message, code: error.code };
+  }
+}
+
+// Send email notification (auto-select method)
+async function sendEmail(subject, message) {
+  if (emailMethod === 'sendgrid') {
+    return await sendEmailViaSendGrid(subject, message);
+  } else if (emailMethod === 'smtp') {
+    return await sendEmailViaSMTP(subject, message);
+  } else {
+    console.error('❌ No email method configured');
+    return { success: false, error: 'No email credentials configured' };
   }
 }
 
@@ -239,7 +297,8 @@ app.post('/webhook/inventory', async (req, res) => {
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ 
-    status: 'ok', 
+    status: 'ok',
+    emailMethod: emailMethod,
     monitoring: CONFIG.BRANDS_TO_MONITOR,
     timestamp: new Date().toISOString()
   });
@@ -260,13 +319,14 @@ app.get('/check-now', async (req, res) => {
   }
 });
 
-// Test email endpoint - NEW!
+// Test email endpoint
 app.get('/test-email', async (req, res) => {
   try {
     console.log('📧 Testing email...');
     const result = await sendEmail(
       '🧪 Test Email from Shopify Monitor',
       `This is a test email to verify your email configuration is working.\n\n` +
+      `Method: ${emailMethod}\n` +
       `From: ${CONFIG.EMAIL_FROM}\n` +
       `To: ${CONFIG.EMAIL_TO}\n` +
       `Timestamp: ${new Date().toISOString()}\n\n` +
@@ -277,12 +337,14 @@ app.get('/test-email', async (req, res) => {
       res.json({ 
         success: true, 
         message: 'Test email sent! Check your inbox at ' + CONFIG.EMAIL_TO,
+        method: result.method,
         messageId: result.messageId 
       });
     } else {
       res.status(500).json({ 
         success: false, 
-        error: result.error 
+        error: result.error,
+        suggestion: 'Try using SendGrid instead - Gmail SMTP often gets blocked by hosting providers'
       });
     }
   } catch (error) {
@@ -299,6 +361,7 @@ app.get('/', (req, res) => {
   res.json({
     service: 'Shopify Brand Inventory Monitor',
     status: 'running',
+    emailMethod: emailMethod,
     monitoring: CONFIG.BRANDS_TO_MONITOR.length + ' brands',
     endpoints: {
       health: '/health',
@@ -313,4 +376,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Webhook server running on port ${PORT}`);
   console.log(`📦 Monitoring ${CONFIG.BRANDS_TO_MONITOR.length} brands`);
+  console.log(`📧 Email method: ${emailMethod}`);
 });
