@@ -448,7 +448,7 @@ app.post('/admin/register-webhook', async (req, res) => {
   
   try {
     const response = await fetch(
-      `https://${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/webhooks.json`,
+      `${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/webhooks.json`,
       {
         method: 'POST',
         headers: {
