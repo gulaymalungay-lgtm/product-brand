@@ -132,7 +132,7 @@ function verifyWebhook(req) {
 // Fetch all products for a brand (handles pagination)
 async function getProductsForBrand(vendor) {
   let allProducts = [];
-  let url = `https://${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/products.json?vendor=${encodeURIComponent(vendor)}&limit=250`;
+  let url = `${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/products.json?vendor=${encodeURIComponent(vendor)}&limit=250`;
   
   while (url) {
     const response = await fetch(url, {
@@ -424,7 +424,7 @@ app.get('/test-email', async (req, res) => {
 app.get('/admin/webhooks', async (req, res) => {
   try {
     const response = await fetch(
-      `https://${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/webhooks.json`,
+      `${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/webhooks.json`,
       {
         headers: {
           'X-Shopify-Access-Token': CONFIG.SHOPIFY_ACCESS_TOKEN,
