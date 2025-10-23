@@ -212,12 +212,42 @@ async function sendEmailViaSendGrid(subject, message) {
         personalizations: [{
           to: [{ email: CONFIG.EMAIL_TO }]
         }],
-        from: { email: CONFIG.EMAIL_FROM },
+        from: { 
+          email: CONFIG.EMAIL_FROM,
+          name: 'Shopify Inventory Monitor'
+        },
         subject: subject,
         content: [{
-          type: 'text/plain',
-          value: message
-        }]
+          type: 'text/html',
+          value: `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+    <h2 style="margin: 0; color: #212529;">${subject.replace(/🚨|✅/g, '').trim()}</h2>
+  </div>
+  <div style="background: white; padding: 20px; border-radius: 8px; border: 1px solid #dee2e6;">
+    <pre style="font-family: 'Courier New', monospace; white-space: pre-wrap; margin: 0; font-size: 14px;">${message}</pre>
+  </div>
+  <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #dee2e6; font-size: 12px; color: #6c757d;">
+    <p>This is an automated notification from your Shopify Brand Inventory Monitor.</p>
+    <p>Please do not reply to this email.</p>
+  </div>
+</body>
+</html>
+          `
+        }],
+        // Anti-spam headers
+        tracking_settings: {
+          click_tracking: { enable: false },
+          open_tracking: { enable: false }
+        },
+        // Email category for analytics
+        categories: ['inventory-alert']
       })
     });
     
@@ -301,8 +331,8 @@ app.post('/webhook/inventory', async (req, res) => {
   
   // CRITICAL FIX: Wait for Shopify's database to update
   // Shopify's inventory system needs a moment to propagate changes
-  console.log('⏳ Waiting 10 seconds for Shopify inventory to propagate...');
-  await new Promise(resolve => setTimeout(resolve, 10000));
+  console.log('⏳ Waiting 3 seconds for Shopify inventory to propagate...');
+  await new Promise(resolve => setTimeout(resolve, 3000));
   console.log('✅ Proceeding with stock check');
   
   try {
@@ -433,10 +463,79 @@ app.get('/check-now', async (req, res) => {
   try {
     console.log('🔄 Manual check triggered');
     const results = {};
+    const oosbrands = [];
+    
     for (const brand of CONFIG.BRANDS_TO_MONITOR) {
-      results[brand] = await checkBrandStock(brand);
+      const stockStatus = await checkBrandStock(brand);
+      results[brand] = stockStatus;
+      
+      // Collect brands that are completely out of stock
+      if (stockStatus.allOOS && stockStatus.totalProducts > 0) {
+        oosbrands.push({
+          brand: brand,
+          totalProducts: stockStatus.totalProducts
+        });
+      }
     }
-    res.json(results);
+    
+    // Send one consolidated email if any brands are OOS
+    if (oosbrands.length > 0) {
+      console.log(`📧 Found ${oosbrands.length} brand(s) out of stock, sending consolidated email`);
+      
+      // Build the email message
+      let emailMessage = `Manual inventory check completed. Found ${oosbrands.length} brand(s) completely out of stock:\n\n`;
+      emailMessage += `⚠️ BRANDS OUT OF STOCK:\n`;
+      emailMessage += `${'='.repeat(50)}\n\n`;
+      
+      oosbrands.forEach((item, index) => {
+        emailMessage += `${index + 1}. ${item.brand}\n`;
+        emailMessage += `   Total Products: ${item.totalProducts}\n`;
+        emailMessage += `   Status: ALL OUT OF STOCK\n\n`;
+      });
+      
+      emailMessage += `${'='.repeat(50)}\n`;
+      emailMessage += `Total Brands Monitored: ${CONFIG.BRANDS_TO_MONITOR.length}\n`;
+      emailMessage += `Brands Out of Stock: ${oosbrands.length}\n`;
+      emailMessage += `Brands In Stock: ${CONFIG.BRANDS_TO_MONITOR.length - oosbrands.length}\n\n`;
+      emailMessage += `⚠️ ACTION REQUIRED: Hide these brands from your brand page.\n\n`;
+      emailMessage += `Timestamp: ${new Date().toISOString()}`;
+      
+      // Send the email
+      const emailResult = await sendEmail(
+        `🚨 Manual Check: ${oosbrands.length} Brand(s) Out of Stock`,
+        emailMessage
+      );
+      
+      if (emailResult.success) {
+        console.log('✅ Consolidated OOS email sent successfully');
+      } else {
+        console.error('❌ Failed to send OOS email:', emailResult.error);
+      }
+      
+      // Add email status to response
+      res.json({
+        results: results,
+        summary: {
+          totalBrands: CONFIG.BRANDS_TO_MONITOR.length,
+          brandsOutOfStock: oosbrands.length,
+          brandsInStock: CONFIG.BRANDS_TO_MONITOR.length - oosbrands.length,
+          emailSent: emailResult.success,
+          oosBrands: oosbrands.map(item => item.brand)
+        }
+      });
+    } else {
+      console.log('✅ All monitored brands have stock, no email needed');
+      res.json({
+        results: results,
+        summary: {
+          totalBrands: CONFIG.BRANDS_TO_MONITOR.length,
+          brandsOutOfStock: 0,
+          brandsInStock: CONFIG.BRANDS_TO_MONITOR.length,
+          emailSent: false,
+          message: 'All brands have inventory in stock'
+        }
+      });
+    }
   } catch (error) {
     console.error('❌ Error in manual check:', error);
     res.status(500).json({ error: error.message });
@@ -522,7 +621,7 @@ app.post('/admin/register-webhook', async (req, res) => {
   
   try {
     const response = await fetch(
-      `https://${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/webhooks.json`,
+      `${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/webhooks.json`,
       {
         method: 'POST',
         headers: {
