@@ -301,8 +301,8 @@ app.post('/webhook/inventory', async (req, res) => {
   
   // CRITICAL FIX: Wait for Shopify's database to update
   // Shopify's inventory system needs a moment to propagate changes
-  console.log('⏳ Waiting 3 seconds for Shopify inventory to propagate...');
-  await new Promise(resolve => setTimeout(resolve, 6000));
+  console.log('⏳ Waiting 10 seconds for Shopify inventory to propagate...');
+  await new Promise(resolve => setTimeout(resolve, 10000));
   console.log('✅ Proceeding with stock check');
   
   try {
