@@ -306,44 +306,118 @@ app.post('/webhook/inventory', async (req, res) => {
   console.log('✅ Proceeding with stock check');
   
   try {
-    // Check each monitored brand
-    for (const brand of CONFIG.BRANDS_TO_MONITOR) {
-      console.log(`🔍 Checking stock for: ${brand}`);
-      const stockStatus = await checkBrandStock(brand);
-      const lastState = lastNotificationState[brand];
-      
-      console.log(`📊 ${brand}: ${stockStatus.inStockProducts}/${stockStatus.totalProducts} in stock`);
-      
-      // All products are OOS - send alert if state changed
-      if (stockStatus.allOOS && lastState !== 'OOS') {
-        console.log(`🚨 ${brand} - ALL OUT OF STOCK`);
-        await sendEmail(
-          `🚨 ALL ${brand} Products OUT OF STOCK`,
-          `All ${stockStatus.totalProducts} products for "${brand}" are now out of stock.\n\n` +
-          `⚠️ ACTION REQUIRED: Hide this brand from your brand page.\n\n` +
-          `Brand: ${brand}\n` +
-          `Total Products: ${stockStatus.totalProducts}\n` +
-          `Out of Stock: ${stockStatus.oosProducts}\n\n` +
-          `Timestamp: ${new Date().toISOString()}`
-        );
-        lastNotificationState[brand] = 'OOS';
+    // Get the inventory item that changed from webhook
+    const inventoryItemId = req.body.inventory_item_id;
+    
+    if (!inventoryItemId) {
+      console.log('⚠️  No inventory_item_id in webhook, skipping');
+      return;
+    }
+    
+    // Fetch the product that owns this inventory item
+    console.log(`🔍 Looking up product for inventory item: ${inventoryItemId}`);
+    const productResponse = await fetch(
+      `${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/inventory_items/${inventoryItemId}.json`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': CONFIG.SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        }
       }
-      
-      // At least one product back in stock
-      else if (!stockStatus.allOOS && stockStatus.inStockProducts > 0 && lastState === 'OOS') {
-        console.log(`✅ ${brand} - BACK IN STOCK`);
-        await sendEmail(
-          `✅ ${brand} Products BACK IN STOCK`,
-          `Good news! ${stockStatus.inStockProducts} product(s) for "${brand}" are back in stock.\n\n` +
-          `✅ ACTION REQUIRED: Show this brand on your brand page.\n\n` +
-          `Brand: ${brand}\n` +
-          `Total Products: ${stockStatus.totalProducts}\n` +
-          `In Stock: ${stockStatus.inStockProducts}\n` +
-          `Out of Stock: ${stockStatus.oosProducts}\n\n` +
-          `Timestamp: ${new Date().toISOString()}`
-        );
-        lastNotificationState[brand] = 'IN_STOCK';
+    );
+    
+    if (!productResponse.ok) {
+      console.error('❌ Failed to fetch inventory item');
+      return;
+    }
+    
+    const inventoryData = await productResponse.json();
+    const variantId = inventoryData.inventory_item.variant_id;
+    
+    // Get the variant to find the product
+    console.log(`🔍 Looking up variant: ${variantId}`);
+    const variantResponse = await fetch(
+      `${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/variants/${variantId}.json`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': CONFIG.SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        }
       }
+    );
+    
+    if (!variantResponse.ok) {
+      console.error('❌ Failed to fetch variant');
+      return;
+    }
+    
+    const variantData = await variantResponse.json();
+    const productId = variantData.variant.product_id;
+    
+    // Get the product to find the vendor/brand
+    console.log(`🔍 Looking up product: ${productId}`);
+    const productDataResponse = await fetch(
+      `${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/products/${productId}.json`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': CONFIG.SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    if (!productDataResponse.ok) {
+      console.error('❌ Failed to fetch product');
+      return;
+    }
+    
+    const productFullData = await productDataResponse.json();
+    const vendor = productFullData.product.vendor;
+    
+    console.log(`📦 Brand that changed: ${vendor}`);
+    
+    // Check if this brand is in our monitoring list
+    if (!CONFIG.BRANDS_TO_MONITOR.includes(vendor)) {
+      console.log(`⏭️  Brand "${vendor}" is not in monitoring list, skipping`);
+      return;
+    }
+    
+    // Only check the brand that actually changed
+    console.log(`🔍 Checking stock for: ${vendor}`);
+    const stockStatus = await checkBrandStock(vendor);
+    const lastState = lastNotificationState[vendor];
+    
+    console.log(`📊 ${vendor}: ${stockStatus.inStockProducts}/${stockStatus.totalProducts} in stock`);
+    
+    // All products are OOS - send alert if state changed
+    if (stockStatus.allOOS && lastState !== 'OOS') {
+      console.log(`🚨 ${vendor} - ALL OUT OF STOCK`);
+      await sendEmail(
+        `🚨 ALL ${vendor} Products OUT OF STOCK`,
+        `All ${stockStatus.totalProducts} products for "${vendor}" are now out of stock.\n\n` +
+        `⚠️ ACTION REQUIRED: Hide this brand from your brand page.\n\n` +
+        `Brand: ${vendor}\n` +
+        `Total Products: ${stockStatus.totalProducts}\n` +
+        `Out of Stock: ${stockStatus.oosProducts}\n\n` +
+        `Timestamp: ${new Date().toISOString()}`
+      );
+      lastNotificationState[vendor] = 'OOS';
+    }
+    
+    // At least one product back in stock
+    else if (!stockStatus.allOOS && stockStatus.inStockProducts > 0 && lastState === 'OOS') {
+      console.log(`✅ ${vendor} - BACK IN STOCK`);
+      await sendEmail(
+        `✅ ${vendor} Products BACK IN STOCK`,
+        `Good news! ${stockStatus.inStockProducts} product(s) for "${vendor}" are back in stock.\n\n` +
+        `✅ ACTION REQUIRED: Show this brand on your brand page.\n\n` +
+        `Brand: ${vendor}\n` +
+        `Total Products: ${stockStatus.totalProducts}\n` +
+        `In Stock: ${stockStatus.inStockProducts}\n` +
+        `Out of Stock: ${stockStatus.oosProducts}\n\n` +
+        `Timestamp: ${new Date().toISOString()}`
+      );
+      lastNotificationState[vendor] = 'IN_STOCK';
     }
   } catch (error) {
     console.error('❌ Error processing webhook:', error);
@@ -454,7 +528,7 @@ app.post('/admin/register-webhook', async (req, res) => {
   
   try {
     const response = await fetch(
-      `${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/webhooks.json`,
+      `https://${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/webhooks.json`,
       {
         method: 'POST',
         headers: {
