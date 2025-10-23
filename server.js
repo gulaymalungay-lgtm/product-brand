@@ -314,66 +314,60 @@ app.post('/webhook/inventory', async (req, res) => {
       return;
     }
     
-    // Fetch the product that owns this inventory item
     console.log(`🔍 Looking up product for inventory item: ${inventoryItemId}`);
-    const productResponse = await fetch(
-      `${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/inventory_items/${inventoryItemId}.json`,
+    
+    // Use GraphQL to efficiently find the product by inventory_item_id
+    const graphqlQuery = `
+      query getInventoryItem($id: ID!) {
+        inventoryItem(id: $id) {
+          variant {
+            product {
+              vendor
+              title
+            }
+          }
+        }
+      }
+    `;
+    
+    const graphqlResponse = await fetch(
+      `${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/graphql.json`,
       {
+        method: 'POST',
         headers: {
           'X-Shopify-Access-Token': CONFIG.SHOPIFY_ACCESS_TOKEN,
           'Content-Type': 'application/json'
-        }
+        },
+        body: JSON.stringify({
+          query: graphqlQuery,
+          variables: {
+            id: `gid://shopify/InventoryItem/${inventoryItemId}`
+          }
+        })
       }
     );
     
-    if (!productResponse.ok) {
-      console.error('❌ Failed to fetch inventory item');
+    if (!graphqlResponse.ok) {
+      console.error('❌ GraphQL query failed');
       return;
     }
     
-    const inventoryData = await productResponse.json();
-    const variantId = inventoryData.inventory_item.variant_id;
+    const graphqlData = await graphqlResponse.json();
     
-    // Get the variant to find the product
-    console.log(`🔍 Looking up variant: ${variantId}`);
-    const variantResponse = await fetch(
-      `${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/variants/${variantId}.json`,
-      {
-        headers: {
-          'X-Shopify-Access-Token': CONFIG.SHOPIFY_ACCESS_TOKEN,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    
-    if (!variantResponse.ok) {
-      console.error('❌ Failed to fetch variant');
+    if (graphqlData.errors) {
+      console.error('❌ GraphQL errors:', JSON.stringify(graphqlData.errors));
       return;
     }
     
-    const variantData = await variantResponse.json();
-    const productId = variantData.variant.product_id;
+    const vendor = graphqlData.data?.inventoryItem?.variant?.product?.vendor;
+    const productTitle = graphqlData.data?.inventoryItem?.variant?.product?.title;
     
-    // Get the product to find the vendor/brand
-    console.log(`🔍 Looking up product: ${productId}`);
-    const productDataResponse = await fetch(
-      `${CONFIG.SHOPIFY_SHOP}/admin/api/2024-10/products/${productId}.json`,
-      {
-        headers: {
-          'X-Shopify-Access-Token': CONFIG.SHOPIFY_ACCESS_TOKEN,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    
-    if (!productDataResponse.ok) {
-      console.error('❌ Failed to fetch product');
+    if (!vendor) {
+      console.log('❌ Could not find vendor for this inventory item');
       return;
     }
     
-    const productFullData = await productDataResponse.json();
-    const vendor = productFullData.product.vendor;
-    
+    console.log(`📦 Product: ${productTitle}`);
     console.log(`📦 Brand that changed: ${vendor}`);
     
     // Check if this brand is in our monitoring list
